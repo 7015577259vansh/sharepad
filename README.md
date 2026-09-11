@@ -1,49 +1,54 @@
-# SharePad — setup aur deployment guide
+SharePad
 
-## Step 1: Supabase project banao (free database)
+A lightweight, no-login note and photo sharing app — think Dontpad, but with image support.
 
-1. https://supabase.com pe jaao, sign up karo (GitHub se ho sakta hai)
-2. "New project" click karo, naam do (e.g. sharepad), password set karo, region select karo (Mumbai/Singapore rakho, India ke liye fastest)
-3. Project ban jaane ke baad, left sidebar me "SQL Editor" pe jaao
-4. Is repo ki `supabase_setup.sql` file ka pura content copy karo, paste karo, "Run" dabao — ye tumhari `pages` table bana dega
-5. Left sidebar me "Project Settings" > "API" pe jaao
-6. Wahan se "Project URL" aur "anon public" key copy kar lo — inhe agle step me use karenge
+Live demo: sharepad-ten.vercel.app
 
-## Step 2: Local setup
+Overview
 
-1. Terminal me is folder ke andar jaao: `cd sharepad`
-2. `npm install` chalao
-3. `.env.example` file ko copy karke naam `.env` rakho: `cp .env.example .env`
-4. `.env` file kholo aur apni Supabase URL aur anon key daal do
-5. `npm run dev` chalao — ye local URL dega, browser me khol ke test karo
+SharePad lets anyone create a shared page by simply choosing a code — no sign-up, no account, no friction. Whoever knows the code can view and edit the same page from any device. It's built for quick, throwaway sharing: pasting notes, dropping a few photos, and sending the link to someone else.
 
-## Step 3: GitHub pe push karo
+The core idea was to solve a common friction point with tools like Google Docs (mandatory login) by keeping everything anonymous and code-based, while still supporting image uploads — something most "pastebin"-style tools don't offer.
 
-1. https://github.com pe naya repository banao (private rakh sakte ho)
-2. Terminal me:
-   ```
-   git init
-   git add .
-   git commit -m "initial commit"
-   git branch -M main
-   git remote add origin YOUR_GITHUB_REPO_URL
-   git push -u origin main
-   ```
+Features
+No login required — access any page instantly with a shared code
+Live autosave — text saves automatically as you type
+Photo uploads — up to 12 images per page, client-side resized and compressed before upload to keep storage efficient
+Full-size photo preview — click any thumbnail to view it in a lightbox
+Secure random codes — a built-in generator creates long, non-guessable codes, since short/common codes are trivial to brute-force
+Realtime persistence — backed by a real Postgres database (Supabase), not local/browser storage, so pages persist across devices and sessions
+Tech stack
+Layer	Technology
+Frontend	React + Vite
+Backend / Database	Supabase (Postgres + Row Level Security)
+Hosting	Vercel
+Image handling	Client-side canvas resizing before upload
+Architecture notes
+All data is stored in a single pages table (code, text, photos, updated_at) in Supabase
+Row Level Security (RLS) policies control read/write access at the database level
+Images are resized and compressed in-browser (max 1000px, JPEG ~70% quality) before being base64-encoded and stored, keeping payloads small without needing separate file storage infrastructure
+The app is a fully static single-page app — no custom backend server required
+Setup and local development
+1. Create a Supabase project
+Sign up at supabase.com and create a new project
+In the SQL Editor, run the contents of supabase_setup.sql to create the pages table and its policies
+From Project Settings > API, copy your Project URL and anon/publishable key
+From Integrations > Data API > Settings, make sure the pages table is toggled on under "Exposed tables"
+2. Local development
+bash
+git clone <this-repo-url>
+cd sharepad
+npm install
+cp .env.example .env   # then fill in your Supabase URL and key
+npm run dev
+3. Deploy
 
-## Step 4: Vercel pe deploy karo (free hosting)
+The project is set up to deploy on Vercel with zero configuration:
 
-1. https://vercel.com pe jaao, GitHub se sign up karo
-2. "Add New Project" > apna GitHub repo select karo
-3. Framework "Vite" auto-detect ho jayega
-4. "Environment Variables" section me ye do daalo (same jo `.env` me the):
-   - `VITE_SUPABASE_URL`
-   - `VITE_SUPABASE_ANON_KEY`
-5. "Deploy" dabao — 1-2 minute me live ho jayega
-
-Deploy hone ke baad Vercel tumhe ek link dega jaise `sharepad-yourname.vercel.app` — ye real, live, HTTPS website hai jo koi bhi visit kar sakta hai.
-
-## Security notes
-
-- Random code generator already app me hai ("Generate a secure random page" button) — chhote guessable code ki jagah ye use karna better hai
-- `supabase_setup.sql` me abhi policies sabko read/write allow karti hain (jaise Dontpad). Agar aage chal ke password/PIN layer chahiye, wo agla upgrade ho sakta hai
-- Apna khud ka domain (jaise sharepad.com) chahiye to Vercel ke "Domains" section me add kar sakte ho (domain kharidna padega, ~Rs 700-1000/year GoDaddy ya Namecheap se)
+Import the GitHub repo into a new Vercel project (Vite is auto-detected)
+Add VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY as environment variables
+Deploy — any future push to main triggers an automatic redeploy
+Security considerations
+Pages are protected only by the obscurity of their code, similar to Dontpad — the built-in random code generator is the recommended way to create pages, since short/predictable codes can be discovered
+Row Level Security policies currently allow open read/write access, matching the "no login" design goal
+Planned improvements: optional PIN/password protection per page, automatic expiry of inactive pages, and rate limiting on page lookups
