@@ -397,7 +397,7 @@ export default function SharePad() {
       <div style={styles.page}>
         <div style={styles.landingWrap}>
           <h1 style={styles.title}>SharePad</h1>
-          <p style={styles.subtitle}>Write text and drop photos. Share the code, no login.</p>
+          <p style={styles.subtitle}>Drop text, photos and any type of file. Share the code, no login.</p>
           <div style={styles.inputRow}>
             <span style={styles.prefix}>sharepad/</span>
             <input
