@@ -1,6 +1,11 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { supabase } from './supabaseClient';
 
+const MAX_PHOTOS = 12;
+const MAX_FILES = 15;
+const MAX_FILE_SIZE = 50 * 1024 * 1024; // 50 MB (Supabase free plan limit)
+const BUCKET = 'sharepad-files';
+
 function resizeImage(file, maxDim = 1000, quality = 0.7) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -37,39 +42,69 @@ function generateRandomCode(len = 10) {
   return out;
 }
 
+function uniqueId() {
+  if (typeof crypto !== 'undefined' && crypto.randomUUID) return crypto.randomUUID();
+  return generateRandomCode(16);
+}
+
+const TEXT_EXTS = ['txt','md','json','js','jsx','ts','tsx','py','cpp','c','h','java','html','css','csv','xml','yml','yaml','sql','log','sh','env','ini'];
+
+function getPreviewKind(file) {
+  const type = file.type || '';
+  const ext = (file.name.split('.').pop() || '').toLowerCase();
+  if (type.startsWith('image/')) return 'image';
+  if (type === 'application/pdf' || ext === 'pdf') return 'pdf';
+  if (type.startsWith('video/')) return 'video';
+  if (type.startsWith('audio/')) return 'audio';
+  if (type.startsWith('text/') || TEXT_EXTS.includes(ext)) return 'text';
+  return 'none';
+}
+
 export default function SharePad() {
   const [stage, setStage] = useState('landing');
   const [codeInput, setCodeInput] = useState('');
   const [code, setCode] = useState('');
   const [text, setText] = useState('');
   const [photos, setPhotos] = useState([]);
+  const [files, setFiles] = useState([]);
+  const [fileBusy, setFileBusy] = useState(false);
   const [loading, setLoading] = useState(false);
   const [saveStatus, setSaveStatus] = useState('idle');
   const [uploadError, setUploadError] = useState('');
+  const [fileError, setFileError] = useState('');
   const [codeError, setCodeError] = useState('');
+  const [preview, setPreview] = useState(null);
   const [previewPhoto, setPreviewPhoto] = useState(null);
   const saveTimer = useRef(null);
   const fileInputRef = useRef(null);
+  const attachmentInputRef = useRef(null);
+
+  // Always holds the latest text/photos/files so saves never use stale values
+  const latest = useRef({ text: '', photos: [], files: [] });
+  latest.current = { text, photos, files };
 
   const loadPage = useCallback(async (c) => {
     setLoading(true);
     try {
       const { data, error } = await supabase
         .from('pages')
-        .select('text, photos')
+        .select('text, photos, files')
         .eq('code', c)
         .maybeSingle();
       if (error) throw error;
       if (data) {
         setText(data.text || '');
         setPhotos(data.photos || []);
+        setFiles(data.files || []);
       } else {
         setText('');
         setPhotos([]);
+        setFiles([]);
       }
     } catch (err) {
       setText('');
       setPhotos([]);
+      setFiles([]);
     }
     setLoading(false);
   }, []);
@@ -92,19 +127,26 @@ export default function SharePad() {
     openPage(random);
   };
 
-  const persist = useCallback(async (activeCode, newText, newPhotos) => {
+  const persist = useCallback(async (activeCode, newText, newPhotos, newFiles) => {
     if (!activeCode) return;
     setSaveStatus('saving');
     try {
       const { error } = await supabase
         .from('pages')
         .upsert(
-          { code: activeCode, text: newText, photos: newPhotos, updated_at: new Date().toISOString() },
+          {
+            code: activeCode,
+            text: newText,
+            photos: newPhotos,
+            files: newFiles,
+            updated_at: new Date().toISOString()
+          },
           { onConflict: 'code' }
         );
       if (error) throw error;
       setSaveStatus('saved');
     } catch (err) {
+      console.error('Save error:', err);
       setSaveStatus('error');
     }
   }, []);
@@ -113,22 +155,23 @@ export default function SharePad() {
     setText(val);
     if (saveTimer.current) clearTimeout(saveTimer.current);
     saveTimer.current = setTimeout(() => {
-      persist(code, val, photos);
+      persist(code, val, latest.current.photos, latest.current.files);
     }, 700);
   };
 
-  const handleFiles = async (files) => {
+  // ---------- PHOTOS ----------
+  const handlePhotos = async (selectedPhotos) => {
     setUploadError('');
-    const arr = Array.from(files);
-    if (photos.length + arr.length > 12) {
-      setUploadError('Up to 12 photos per page');
+    const arr = Array.from(selectedPhotos);
+    if (photos.length + arr.length > MAX_PHOTOS) {
+      setUploadError(`Up to ${MAX_PHOTOS} photos per page`);
       return;
     }
     try {
       const resized = await Promise.all(arr.map((f) => resizeImage(f)));
-      const newPhotos = [...photos, ...resized];
+      const newPhotos = [...latest.current.photos, ...resized];
       setPhotos(newPhotos);
-      persist(code, text, newPhotos);
+      persist(code, latest.current.text, newPhotos, latest.current.files);
     } catch (err) {
       setUploadError('Could not process one of the images');
     }
@@ -137,137 +180,77 @@ export default function SharePad() {
   const removePhoto = (idx) => {
     const newPhotos = photos.filter((_, i) => i !== idx);
     setPhotos(newPhotos);
-    persist(code, text, newPhotos);
+    persist(code, text, newPhotos, files);
   };
 
-  const copyLink = () => {
-    const url = `${window.location.origin}${window.location.pathname}#${code}`;
-    navigator.clipboard.writeText(url).catch(() => {});
+  // ---------- FILES (pdf, zip, anything) ----------
+  const handleDocumentFiles = async (selectedFiles) => {
+    setFileError('');
+    const arr = Array.from(selectedFiles);
+
+    if (!code) {
+      setFileError('Open a SharePad page first.');
+      return;
+    }
+    if (files.length + arr.length > MAX_FILES) {
+      setFileError(`Maximum ${MAX_FILES} files allowed per page.`);
+      return;
+    }
+    const tooBig = arr.find((f) => f.size > MAX_FILE_SIZE);
+    if (tooBig) {
+      setFileError(`"${tooBig.name}" is larger than 50 MB.`);
+      return;
+    }
+
+    setFileBusy(true);
+    const uploaded = [];
+    let firstError = '';
+
+    for (const file of arr) {
+      try {
+        const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
+        const path = `${code}/${uniqueId()}-${safeName}`;
+
+        const { error } = await supabase.storage
+          .from(BUCKET)
+          .upload(path, file, { contentType: file.type || 'application/octet-stream' });
+        if (error) throw error;
+
+        const { data } = supabase.storage.from(BUCKET).getPublicUrl(path);
+
+        uploaded.push({
+          name: file.name,
+          path,
+          url: data.publicUrl,
+          size: file.size,
+          type: file.type || 'application/octet-stream'
+        });
+      } catch (err) {
+        console.error('File upload error:', err);
+        if (!firstError) firstError = err.message || `Could not upload "${file.name}".`;
+      }
+    }
+
+    // Save whatever uploaded successfully, even if one file failed
+    if (uploaded.length > 0) {
+      const updatedFiles = [...latest.current.files, ...uploaded];
+      setFiles(updatedFiles);
+      await persist(code, latest.current.text, latest.current.photos, updatedFiles);
+    }
+
+    if (firstError) setFileError(firstError);
+    setFileBusy(false);
   };
 
-  useEffect(() => {
-    const hash = window.location.hash.replace('#', '');
-    if (hash) openPage(hash);
-    return () => {
-      if (saveTimer.current) clearTimeout(saveTimer.current);
-    };
-  }, []);
+  const removeDocumentFile = async (index) => {
+    const fileToRemove = files[index];
+    if (!fileToRemove) return;
 
-  const styles = {
-    page: { minHeight: '100vh', background: '#faf9f6', fontFamily: '-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif', color: '#1a1a1a' },
-    landingWrap: { minHeight: '100vh', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: '24px' },
-    title: { fontSize: '48px', fontWeight: 700, letterSpacing: '-1px', margin: 0 },
-    subtitle: { fontSize: '17px', color: '#666', marginTop: '10px', marginBottom: '32px' },
-    inputRow: { display: 'flex', border: '1.5px solid #ddd', borderRadius: '10px', overflow: 'hidden', background: '#fff', width: '100%', maxWidth: '480px' },
-    prefix: { display: 'flex', alignItems: 'center', padding: '0 14px', color: '#999', fontSize: '15px', background: '#f5f4f0', borderRight: '1.5px solid #ddd', whiteSpace: 'nowrap' },
-    input: { flex: 1, border: 'none', outline: 'none', padding: '14px 12px', fontSize: '16px', background: 'transparent', color: '#1a1a1a' },
-    goBtn: { border: 'none', background: '#1a1a1a', color: '#fff', padding: '0 22px', fontSize: '15px', fontWeight: 500, cursor: 'pointer' },
-    orRow: { display: 'flex', alignItems: 'center', gap: '10px', margin: '18px 0', color: '#aaa', fontSize: '13px', width: '100%', maxWidth: '480px' },
-    hr: { flex: 1, height: '1px', background: '#e5e3dd' },
-    randomBtn: { border: '1.5px solid #ddd', background: '#fff', borderRadius: '10px', padding: '13px 20px', fontSize: '15px', cursor: 'pointer', color: '#1a1a1a', width: '100%', maxWidth: '480px' },
-    hint: { fontSize: '13px', color: '#999', marginTop: '16px', maxWidth: '420px', textAlign: 'center' },
-    errorText: { fontSize: '13px', color: '#c0392b', marginTop: '10px' },
-    header: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '16px 24px', borderBottom: '1px solid #e5e3dd', background: '#fff', position: 'sticky', top: 0, zIndex: 5 },
-    codeLabel: { fontSize: '15px', fontWeight: 600 },
-    statusText: { fontSize: '12px', color: '#999' },
-    backBtn: { border: '1px solid #ddd', background: '#fff', borderRadius: '8px', padding: '6px 12px', fontSize: '13px', cursor: 'pointer', color: '#444' },
-    body: { maxWidth: '760px', margin: '0 auto', padding: '24px' },
-    textarea: { width: '100%', minHeight: '220px', border: '1px solid #e5e3dd', borderRadius: '10px', padding: '16px', fontSize: '16px', lineHeight: 1.6, fontFamily: 'inherit', resize: 'vertical', outline: 'none', background: '#fff', boxSizing: 'border-box' },
-    uploadZone: { marginTop: '20px', border: '1.5px dashed #ccc', borderRadius: '10px', padding: '22px', textAlign: 'center', cursor: 'pointer', color: '#777', fontSize: '14px', background: '#fff' },
-    photoGrid: { display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(120px, 1fr))', gap: '12px', marginTop: '16px' },
-    photoWrap: { position: 'relative', borderRadius: '8px', overflow: 'hidden', border: '1px solid #e5e3dd', aspectRatio: '1' },
-    photoImg: { width: '100%', height: '100%', objectFit: 'cover', display: 'block' },
-    removeBtn: { position: 'absolute', top: '4px', right: '4px', background: 'rgba(0,0,0,0.6)', color: '#fff', border: 'none', borderRadius: '50%', width: '22px', height: '22px', fontSize: '13px', cursor: 'pointer', lineHeight: 1 },
-    lightboxOverlay: { position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, background: 'rgba(0,0,0,0.85)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 50, padding: '24px', boxSizing: 'border-box' },
-    lightboxImg: { maxWidth: '100%', maxHeight: '90vh', borderRadius: '8px', objectFit: 'contain' },
-    lightboxClose: { position: 'absolute', top: '20px', right: '24px', background: 'rgba(255,255,255,0.15)', color: '#fff', border: 'none', borderRadius: '50%', width: '36px', height: '36px', fontSize: '18px', cursor: 'pointer' },
-  };
+    setFileError('');
+    setFileBusy(true);
 
-  if (stage === 'landing') {
-    return (
-      <div style={styles.page}>
-        <div style={styles.landingWrap}>
-          <h1 style={styles.title}>SharePad</h1>
-          <p style={styles.subtitle}>Write text and drop photos. Share the code, no login.</p>
-          <div style={styles.inputRow}>
-            <span style={styles.prefix}>sharepad/</span>
-            <input
-              style={styles.input}
-              placeholder="your-secret-page"
-              value={codeInput}
-              onChange={(e) => { setCodeInput(e.target.value); setCodeError(''); }}
-              onKeyDown={(e) => { if (e.key === 'Enter') openPage(codeInput); }}
-            />
-            <button style={styles.goBtn} onClick={() => openPage(codeInput)}>Go</button>
-          </div>
-          {codeError && <div style={styles.errorText}>{codeError}</div>}
-          <div style={styles.orRow}><div style={styles.hr} /><span>or</span><div style={styles.hr} /></div>
-          <button style={styles.randomBtn} onClick={createNewRandomPage}>Generate a secure random page</button>
-          <div style={styles.hint}>Anyone with the exact code sees the same page. A random code is much harder to guess than a short word.</div>
-        </div>
-      </div>
-    );
-  }
-
-  return (
-    <div style={styles.page}>
-      <div style={styles.header}>
-        <div>
-          <div style={styles.codeLabel}>sharepad/{code}</div>
-          <div style={styles.statusText}>
-            {loading ? 'Loading…' : saveStatus === 'saving' ? 'Saving…' : saveStatus === 'saved' ? 'Saved' : saveStatus === 'error' ? 'Could not save, retrying' : 'Everyone with this code sees this page'}
-          </div>
-        </div>
-        <div style={{ display: 'flex', gap: '8px' }}>
-          <button style={styles.backBtn} onClick={copyLink}>Copy link</button>
-          <button style={styles.backBtn} onClick={() => { setStage('landing'); setCodeInput(''); setCode(''); setText(''); setPhotos([]); window.location.hash = ''; }}>New page</button>
-        </div>
-      </div>
-
-      <div style={styles.body}>
-        <textarea
-          style={styles.textarea}
-          placeholder="Write anything here. It saves as you type."
-          value={text}
-          onChange={(e) => handleTextChange(e.target.value)}
-        />
-
-        <input
-          ref={fileInputRef}
-          type="file"
-          accept="image/*"
-          multiple
-          style={{ display: 'none' }}
-          onChange={(e) => { if (e.target.files.length) handleFiles(e.target.files); e.target.value = ''; }}
-        />
-        <div style={styles.uploadZone} onClick={() => fileInputRef.current.click()}>
-          Tap to add photos ({photos.length}/12)
-        </div>
-        {uploadError && <div style={styles.errorText}>{uploadError}</div>}
-
-        {photos.length > 0 && (
-          <div style={styles.photoGrid}>
-            {photos.map((p, i) => (
-              <div style={styles.photoWrap} key={i}>
-                <img
-                  src={p}
-                  style={{ ...styles.photoImg, cursor: 'pointer' }}
-                  alt={`upload ${i + 1}`}
-                  onClick={() => setPreviewPhoto(p)}
-                />
-                <button style={styles.removeBtn} onClick={() => removePhoto(i)} aria-label="Remove photo">×</button>
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
-
-      {previewPhoto && (
-        <div style={styles.lightboxOverlay} onClick={() => setPreviewPhoto(null)}>
-          <button style={styles.lightboxClose} onClick={() => setPreviewPhoto(null)} aria-label="Close">×</button>
-          <img src={previewPhoto} style={styles.lightboxImg} alt="Full size preview" onClick={(e) => e.stopPropagation()} />
-        </div>
-      )}
-    </div>
-  );
-}
+    try {
+      const { error } = await supabase.storage
+        .from(BUCKET)
+        .remove([fileToRemove.path]);
+      if (error) throw error;
