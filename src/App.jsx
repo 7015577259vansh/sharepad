@@ -74,7 +74,7 @@ export default function SharePad() {
   const [fileError, setFileError] = useState('');
   const [codeError, setCodeError] = useState('');
   const [preview, setPreview] = useState(null);
-  const [previewPhoto, setPreviewPhoto] = useState(null);
+  const [previewPhoto, setPreviewPhoto] = useState(null); // { src, index }
   const saveTimer = useRef(null);
   const fileInputRef = useRef(null);
   const attachmentInputRef = useRef(null);
@@ -181,6 +181,15 @@ export default function SharePad() {
     const newPhotos = photos.filter((_, i) => i !== idx);
     setPhotos(newPhotos);
     persist(code, text, newPhotos, files);
+  };
+
+  const downloadPhoto = (src, index) => {
+    const a = document.createElement('a');
+    a.href = src;
+    a.download = `sharepad-photo-${index + 1}.jpg`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
   };
 
   // ---------- FILES (pdf, zip, anything) ----------
@@ -362,9 +371,11 @@ export default function SharePad() {
     photoWrap: { position: 'relative', borderRadius: '8px', overflow: 'hidden', border: '1px solid #e5e3dd', aspectRatio: '1' },
     photoImg: { width: '100%', height: '100%', objectFit: 'cover', display: 'block' },
     removeBtn: { position: 'absolute', top: '4px', right: '4px', background: 'rgba(0,0,0,0.6)', color: '#fff', border: 'none', borderRadius: '50%', width: '22px', height: '22px', fontSize: '13px', cursor: 'pointer', lineHeight: 1 },
+    photoDownloadBtn: { position: 'absolute', bottom: '4px', right: '4px', background: 'rgba(0,0,0,0.6)', color: '#fff', border: 'none', borderRadius: '50%', width: '22px', height: '22px', fontSize: '13px', cursor: 'pointer', lineHeight: 1 },
     lightboxOverlay: { position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, background: 'rgba(0,0,0,0.85)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 50, padding: '24px', boxSizing: 'border-box' },
     lightboxImg: { maxWidth: '100%', maxHeight: '90vh', borderRadius: '8px', objectFit: 'contain' },
     lightboxClose: { position: 'absolute', top: '20px', right: '24px', background: 'rgba(255,255,255,0.15)', color: '#fff', border: 'none', borderRadius: '50%', width: '36px', height: '36px', fontSize: '18px', cursor: 'pointer' },
+    lightboxDownload: { position: 'absolute', top: '20px', right: '72px', background: 'rgba(255,255,255,0.15)', color: '#fff', border: 'none', borderRadius: '18px', height: '36px', padding: '0 16px', fontSize: '14px', cursor: 'pointer' },
     fileRow: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px', padding: '12px', marginTop: '8px', border: '1px solid #e5e3dd', borderRadius: '8px', background: '#fff', overflowWrap: 'anywhere' },
     fileName: { fontSize: '14px', fontWeight: 500 },
     fileSize: { fontSize: '12px', color: '#999' },
@@ -471,9 +482,10 @@ export default function SharePad() {
                   src={p}
                   style={{ ...styles.photoImg, cursor: 'pointer' }}
                   alt={`upload ${i + 1}`}
-                  onClick={() => setPreviewPhoto(p)}
+                  onClick={() => setPreviewPhoto({ src: p, index: i })}
                 />
                 <button style={styles.removeBtn} onClick={() => removePhoto(i)} aria-label="Remove photo">×</button>
+                <button style={styles.photoDownloadBtn} onClick={() => downloadPhoto(p, i)} aria-label="Download photo">↓</button>
               </div>
             ))}
           </div>
@@ -562,8 +574,14 @@ export default function SharePad() {
       {/* PHOTO LIGHTBOX */}
       {previewPhoto && (
         <div style={styles.lightboxOverlay} onClick={() => setPreviewPhoto(null)}>
+          <button
+            style={styles.lightboxDownload}
+            onClick={(e) => { e.stopPropagation(); downloadPhoto(previewPhoto.src, previewPhoto.index); }}
+          >
+            Download
+          </button>
           <button style={styles.lightboxClose} onClick={() => setPreviewPhoto(null)} aria-label="Close">×</button>
-          <img src={previewPhoto} style={styles.lightboxImg} alt="Full size preview" onClick={(e) => e.stopPropagation()} />
+          <img src={previewPhoto.src} style={styles.lightboxImg} alt="Full size preview" onClick={(e) => e.stopPropagation()} />
         </div>
       )}
     </div>
